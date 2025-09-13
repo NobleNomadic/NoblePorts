@@ -1,0 +1,3 @@
+# Hide cert.pem and key.pem for HTTPS sockets, you will need to provide your own
+http/build/cert.pem
+http/build/key.pem

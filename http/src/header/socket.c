@@ -8,11 +8,52 @@
 #include <sys/types.h>    // For data types
 #include <netinet/in.h>   // For sockaddr_in
 #include <unistd.h>       // For close
+#include <openssl/ssl.h>  // For SSL/TLS support
+#include <openssl/err.h>  // For SSL error reporting
 
 #define BACKLOG 10        // Number of pending connections queue will hold
 
+// Initializes the OpenSSL library and creates a new SSL context
+// Returns a pointer to the initialized SSL_CTX structure
+SSL_CTX *initTLSContext() {
+  // Load all available encryption algorithms and error strings
+  SSL_library_init();
+  OpenSSL_add_all_algorithms();
+  SSL_load_error_strings();
+
+  // Create a new SSL context using the TLS server method
+  const SSL_METHOD *method = TLS_server_method();
+  SSL_CTX *ctx = SSL_CTX_new(method);
+  if (!ctx) {
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  return ctx;
+}
+
+// Loads the certificate and private key into the SSL context.
+void loadCertificates(SSL_CTX *ctx, const char *certFile, const char *keyFile) {
+  // Load server certificate into SSL context
+  if (SSL_CTX_use_certificate_file(ctx, certFile, SSL_FILETYPE_PEM) <= 0) {
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  // Load private key into SSL context
+  if (SSL_CTX_use_PrivateKey_file(ctx, keyFile, SSL_FILETYPE_PEM) <= 0) {
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  // Verify that the private key matches the certificate
+  if (!SSL_CTX_check_private_key(ctx)) {
+    fprintf(stderr, "Private key does not match the certificate\n");
+    exit(EXIT_FAILURE);
+  }
+}
+
 // Create and return a new TCP server socket bound to the specified port.
-// Returns the socket file descriptor on success, or -1 on failure.
 int newServerSocket(int port) {
   // Create a new TCP socket (IPv4)
   int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -54,9 +95,8 @@ int newServerSocket(int port) {
   return serverSocket;
 }
 
-// Accept a new client connection on the given server socket.
-// Returns the client socket file descriptor on success, or -1 on failure.
-int acceptClientConnection(int serverSocket) {
+// Establishes a TLS session and returns the SSL* on success, or NULL on failure.
+SSL *acceptClientConnection(int serverSocket, SSL_CTX *ctx) {
   // Define structure to hold client address information
   struct sockaddr_in clientAddr;
   socklen_t addrLen = sizeof(clientAddr);
@@ -65,23 +105,35 @@ int acceptClientConnection(int serverSocket) {
   int clientSocket = accept(serverSocket, (struct sockaddr *)&clientAddr, &addrLen);
   if (clientSocket < 0) {
     perror("Error accepting client connection");
-    return -1;
+    return NULL;
   }
 
-  // Return the client socket file descriptor
-  return clientSocket;
+  // Create a new SSL object for the accepted connection
+  SSL *ssl = SSL_new(ctx);
+  SSL_set_fd(ssl, clientSocket);  // Bind SSL to the client's socket
+
+  // Perform TLS handshake with the client
+  if (SSL_accept(ssl) <= 0) {
+    ERR_print_errors_fp(stderr);
+    SSL_free(ssl);
+    close(clientSocket);
+    return NULL;
+  }
+
+  // Return the SSL object representing the TLS session
+  return ssl;
 }
 
-// Receive data from the specified socket and store it in the buffer.
+// Receive data from the specified TLS session and store it in the buffer.
 // Returns the number of bytes received, or -1 on failure.
-int receiveData(int socket, char *buffer, size_t receiveSize) {
+int receiveData(SSL *ssl, char *buffer, size_t receiveSize) {
   // Clear the buffer before receiving data
   memset(buffer, 0, receiveSize);
 
-  // Receive data into buffer
-  int bytesReceived = recv(socket, buffer, receiveSize, 0);
+  // Receive data over TLS connection
+  int bytesReceived = SSL_read(ssl, buffer, receiveSize);
   if (bytesReceived < 0) {
-    perror("Error receiving data");
+    ERR_print_errors_fp(stderr);
     return -1;
   }
 
@@ -89,16 +141,15 @@ int receiveData(int socket, char *buffer, size_t receiveSize) {
   return bytesReceived;
 }
 
-// Send a string of data through the specified socket.
-// Returns the number of bytes sent, or -1 on failure.
-int sendData(int socket, const char *data) {
+// Send a string of data through the specified TLS session.
+int sendData(SSL *ssl, const char *data) {
   // Get the length of the data to be sent
   int dataLen = strlen(data);
 
-  // Send the data
-  int bytesSent = send(socket, data, dataLen, 0);
+  // Send the data over TLS connection
+  int bytesSent = SSL_write(ssl, data, dataLen);
   if (bytesSent < 0) {
-    perror("Error sending data");
+    ERR_print_errors_fp(stderr);
     return -1;
   }
 

@@ -1,30 +1,32 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
+// main.c - Noble HTTPS Server Entry Point
+
+#include <stdio.h>         // For printf, perror
+#include <stdlib.h>        // For exit, atoi, malloc, free
+#include <string.h>        // For memset, strlen
+#include <unistd.h>        // For close
+#include <fcntl.h>         // For file I/O
 
 // Include custom headers
-#include "../header/socket.h"
-#include "../header/parser.h"
+#include "../header/socket.h"  // TLS socket functions
+#include "../header/parser.h"      // HTTP request parsing
 
-// ==== FUNCTION: Read File ====
+// ==== FUNCTION: readFile ====
 // Read contents of a file and return it as a dynamically allocated string.
 // Caller is responsible for freeing the memory.
 // If the file does not exist or cannot be opened, return NULL.
 char *readFile(const char *filePath) {
   FILE *file = fopen(filePath, "r");
   if (!file) {
-    printf("[!] Failed to open file: %s\n", filePath);  // Add debug output
-    return NULL;  // File could not be opened
+    printf("[!] Failed to open file: %s\n", filePath);  // Output error
+    return NULL;
   }
 
-  // Seek to the end to find file size
+  // Seek to the end to determine file size
   fseek(file, 0, SEEK_END);
   long fileSize = ftell(file);
-  rewind(file);  // Go back to the beginning
+  rewind(file);  // Reset to beginning
 
-  // Allocate buffer (+1 for null terminator)
+  // Allocate buffer to hold the entire file (+1 for null terminator)
   char *buffer = malloc(fileSize + 1);
   if (!buffer) {
     fclose(file);
@@ -39,68 +41,70 @@ char *readFile(const char *filePath) {
   return buffer;
 }
 
-// ==== HANDLER FUNCTION ====
-// Read request from a client socket, parse it, and send appropriate response.
-void handleClient(int clientSocketFD) {
+// ==== FUNCTION: handleClient ====
+// Handle a single HTTPS client session.
+// Reads request, parses it, and sends appropriate HTTP response.
+void handleClient(SSL *ssl) {
   // Step 1: Create buffer for raw HTTP request
   char requestBuffer[2048];
-  memset(requestBuffer, 0, sizeof(requestBuffer));
+  memset(requestBuffer, 0, sizeof(requestBuffer));  // Zero out buffer
 
   // Step 2: Receive the HTTP request from the client
-  receiveData(clientSocketFD, requestBuffer, sizeof(requestBuffer));
+  receiveData(ssl, requestBuffer, sizeof(requestBuffer));
   printf("[*] Received request\n%s\n", requestBuffer);
 
-  // Step 3: Parse raw request into structured data
+  // Step 3: Parse raw request into structured format
   HTTPRequest requestStructure;
   if (parseHTTPRequest(requestBuffer, &requestStructure) != 0) {
-    // Failed to parse the request, return 400 Bad Request
+    // Parsing failed, send 400 Bad Request response
     const char *badRequestResponse =
       "HTTP/1.1 400 Bad Request\r\n\r\nMalformed HTTP request.";
-    sendData(clientSocketFD, badRequestResponse);
+    sendData(ssl, badRequestResponse);
     return;
   }
 
-  // Step 4: Check if the HTTP method is supported
+  // Step 4: Verify that the HTTP method is supported (only GET)
   if (strcmp(requestStructure.method, "GET") != 0) {
-    // Method not allowed (only GET is supported)
+    // Unsupported method — send 405 Method Not Allowed
     const char *methodNotAllowed =
       "HTTP/1.1 405 Method Not Allowed\r\n\r\nOnly GET is allowed.";
-    sendData(clientSocketFD, methodNotAllowed);
+    sendData(ssl, methodNotAllowed);
     return;
   }
 
-  // Step 5: Sanitize path — default to "index.html" if no path provided
+  // Step 5: Determine the requested file path
   char *requestedPath = requestStructure.path[0] == '/'
-    ? requestStructure.path + 1
+    ? requestStructure.path + 1  // Skip leading slash
     : requestStructure.path;
 
+  // If no path is provided, default to "index.html"
   if (strlen(requestedPath) == 0) {
-    requestedPath = "index.html";  // Default fallback file
+    requestedPath = "index.html";
   }
 
-  // Step 6: Security Check — Block any paths containing slashes (e.g., subdirectories or traversal)
+  // Step 6: Security check — block access to subdirectories
   if (strchr(requestedPath, '/')) {
     const char *forbiddenResponse =
       "HTTP/1.1 403 Forbidden\r\n\r\nAccess to subdirectories is not allowed.";
-    sendData(clientSocketFD, forbiddenResponse);
+    sendData(ssl, forbiddenResponse);
     return;
   }
 
-  // Optional: Prepend a known directory for serving (e.g., "www/")
+  // Step 7: Build full file path from request
   char fullPath[512];
   snprintf(fullPath, sizeof(fullPath), "www/%s", requestedPath);
 
-  // Step 7: Read file content from disk
+  // Step 8: Attempt to read the requested file from disk
   char *fileContent = readFile(fullPath);
   if (!fileContent) {
-    // File not found, send 404 response
+    // File not found — send 404 response
     const char *notFound =
       "HTTP/1.1 404 Not Found\r\n\r\nFile not found.";
-    sendData(clientSocketFD, notFound);
+    sendData(ssl, notFound);
     return;
   }
 
-  // Step 8: Create and send HTTP response with file content
+  // Step 9: Construct HTTP response header
   char responseHeader[256];
   snprintf(responseHeader, sizeof(responseHeader),
     "HTTP/1.1 200 OK\r\n"
@@ -108,45 +112,63 @@ void handleClient(int clientSocketFD) {
     "Content-Length: %lu\r\n"
     "\r\n", strlen(fileContent));
 
-  // Send headers first, then content
-  sendData(clientSocketFD, responseHeader);
-  sendData(clientSocketFD, fileContent);
+  // Step 10: Send response header followed by file content
+  sendData(ssl, responseHeader);
+  sendData(ssl, fileContent);
 
-  // Step 9: Clean up
+  // Step 11: Clean up allocated memory
   free(fileContent);
   return;
 }
 
-// ==== ENTRY ====
+// ==== FUNCTION: main ====
+// Entry point for the Noble HTTPS server.
 int main(int argc, char **argv) {
-  printf("NOBLE HTTP SERVER 0.1.0\n");
+  printf("NOBLE HTTPS SERVER 0.1.0\n");
 
-  // Step 1: Check for correct argument usage
+  // Argument failure
   if (argc < 2) {
-    printf("Usage: ./%s <Port>\n", argv[0]);
+    fprintf(stderr, "Usage: ./%s <Port>\n", argv[0]);
+    return 1;  // Incorrect usage
+  }
+
+  // Extract port number from arguments
+  int port = atoi(argv[1]);
+
+  // Initialize TLS context and load certificates
+  printf("[*] Initializing SSL context\n");
+  SSL_CTX *sslContext = initTLSContext();
+  loadCertificates(sslContext, "cert.pem", "key.pem");  // Load cert and key
+
+  // Create the main server socket
+  printf("[*] Creating new server socket on port %d\n", port);
+  int serverSocketFD = newServerSocket(port);
+  if (serverSocketFD < 0) {
+    fprintf(stderr, "[!] Failed to create server socket\n");
     return 1;
   }
 
-  // Step 2: Parse port number from arguments
-  int port = atoi(argv[1]);
-
-  // Step 3: Create new server socket
-  printf("[*] Creating new server socket\n");
-  int serverSocketFD = newServerSocket(port);
-
-  // Step 4: Begin main server loop
+  // Main server loop for handling a client socket
   while (1) {
-    printf("[*] Waiting for connection on port %d\n", port);
+    printf("[*] Waiting for HTTPS connection on port %d\n", port);
 
-    // Accept a new client connection
-    int clientSocketFD = acceptClientConnection(serverSocketFD);
-    printf("[+] Client connected\n");
+    // Accept a new client connection and establish a TLS session
+    SSL *ssl = acceptClientConnection(serverSocketFD, sslContext);
+    if (!ssl) {
+      fprintf(stderr, "[!] TLS handshake failed or client connection error\n");
+      continue;  // Skip to next connection
+    }
 
-    // Handle client request
-    handleClient(clientSocketFD);
+    printf("[+] Client connected via TLS\n");
 
-    // Close client socket after handling
-    close(clientSocketFD);
+    // Handle the request and send a response
+    handleClient(ssl);
+
+    // Shutdown SSL connection
+    SSL_shutdown(ssl);
+    int clientFD = SSL_get_fd(ssl);  // Get underlying socket FD
+    SSL_free(ssl);                   // Free SSL structure
+    close(clientFD);                 // Close socket
   }
 
   return 0;

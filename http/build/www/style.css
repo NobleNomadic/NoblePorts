@@ -1,0 +1,23 @@
+:root {
+  --bg-color: #13161e;
+  --fg-color: #88a4ad;
+}
+
+* {
+  font-family: monospace;
+  background-color: var(--bg-color);
+  color: var(--fg-color);
+  font-size: 1.3rem;
+}
+
+h1 {
+  font-size: 3rem;
+}
+
+.center {
+  width: 50%;
+  margin: auto;
+  border: 2px solid var(--fg-color);
+  padding: 2rem;
+  padding-top: 0;
+}
