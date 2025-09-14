@@ -1,27 +1,23 @@
-// socket.h - HTTPS (TLS) socket handling simplification
+// socket.h - Plain TCP socket handling simplification
 #ifndef SOCKET_H
 #define SOCKET_H
 
 #include <stddef.h>
-#include <openssl/ssl.h>
 
 // Create and return a new TCP server socket bound to the specified port
-int newServerSocket(int port);
+int rawNewServerSocket(int port);
 
-// Initialize a new SSL context for the TLS server
-SSL_CTX *initTLSContext(void);
+// Accept a new TCP client connection
+int rawAcceptClientConnection(int serverSocket);
 
-// Load TLS certificate and private key into the context
-void loadCertificates(SSL_CTX *ctx, const char *certFile, const char *keyFile);
+// Receive data from a TCP client socket into the buffer
+int rawReceiveData(int clientSocket, char *buffer, size_t receiveSize);
 
-// Accept a new TLS client connection and return an SSL session object
-SSL *acceptClientConnection(int serverSocket, SSL_CTX *ctx);
+// Send data through a TCP client socket
+int rawSendData(int clientSocket, const char *data);
 
-// Receive data from a TLS session into the buffer
-int receiveData(SSL *ssl, char *buffer, size_t receiveSize);
-
-// Send data through a TLS session
-int sendData(SSL *ssl, const char *data);
+// Close a TCP socket
+void rawCloseSocket(int sock);
 
 #endif // SOCKET_H
 

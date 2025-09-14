@@ -1,4 +1,4 @@
-// main.c - Noble HTTPS Server Entry Point
+// main.c - Noble HTTP/HTTPS Server Entry Point
 
 #include <stdio.h>         // For printf, perror
 #include <stdlib.h>        // For exit, atoi, malloc, free
@@ -7,7 +7,8 @@
 #include <fcntl.h>         // For file I/O
 
 // Include custom headers
-#include "../header/socket.h"  // TLS socket functions
+#include "../header/sslsocket.h"   // TLS socket functions for HTTPS
+#include "../header/socket.h"      // Regular raw socket functions for HTTP
 #include "../header/parser.h"      // HTTP request parsing
 
 // ==== FUNCTION: readFile ====
@@ -41,16 +42,20 @@ char *readFile(const char *filePath) {
   return buffer;
 }
 
-// ==== FUNCTION: handleClient ====
-// Handle a single HTTPS client session.
+// ==== FUNCTION: HandleClient ====
+// Handle a single client session.
 // Reads request, parses it, and sends appropriate HTTP response.
-void handleClient(SSL *ssl) {
+void HandleClient(void *connection, int isSSL) {
   // Step 1: Create buffer for raw HTTP request
   char requestBuffer[2048];
   memset(requestBuffer, 0, sizeof(requestBuffer));  // Zero out buffer
 
   // Step 2: Receive the HTTP request from the client
-  receiveData(ssl, requestBuffer, sizeof(requestBuffer));
+  if (isSSL) {
+    SSLReceiveData((SSL *)connection, requestBuffer, sizeof(requestBuffer));  // SSL version
+  } else {
+    rawReceiveData(*(int *)connection, requestBuffer, sizeof(requestBuffer));  // Raw HTTP version
+  }
   printf("[*] Received request\n%s\n", requestBuffer);
 
   // Step 3: Parse raw request into structured format
@@ -59,7 +64,11 @@ void handleClient(SSL *ssl) {
     // Parsing failed, send 400 Bad Request response
     const char *badRequestResponse =
       "HTTP/1.1 400 Bad Request\r\n\r\nMalformed HTTP request.";
-    sendData(ssl, badRequestResponse);
+    if (isSSL) {
+      SSLSendData((SSL *)connection, badRequestResponse);
+    } else {
+      rawSendData(*(int *)connection, badRequestResponse);
+    }
     return;
   }
 
@@ -68,7 +77,11 @@ void handleClient(SSL *ssl) {
     // Unsupported method — send 405 Method Not Allowed
     const char *methodNotAllowed =
       "HTTP/1.1 405 Method Not Allowed\r\n\r\nOnly GET is allowed.";
-    sendData(ssl, methodNotAllowed);
+    if (isSSL) {
+      SSLSendData((SSL *)connection, methodNotAllowed);
+    } else {
+      rawSendData(*(int *)connection, methodNotAllowed);
+    }
     return;
   }
 
@@ -86,7 +99,11 @@ void handleClient(SSL *ssl) {
   if (strchr(requestedPath, '/')) {
     const char *forbiddenResponse =
       "HTTP/1.1 403 Forbidden\r\n\r\nAccess to subdirectories is not allowed.";
-    sendData(ssl, forbiddenResponse);
+    if (isSSL) {
+      SSLSendData((SSL *)connection, forbiddenResponse);
+    } else {
+      rawSendData(*(int *)connection, forbiddenResponse);
+    }
     return;
   }
 
@@ -100,7 +117,11 @@ void handleClient(SSL *ssl) {
     // File not found — send 404 response
     const char *notFound =
       "HTTP/1.1 404 Not Found\r\n\r\nFile not found.";
-    sendData(ssl, notFound);
+    if (isSSL) {
+      SSLSendData((SSL *)connection, notFound);
+    } else {
+      rawSendData(*(int *)connection, notFound);
+    }
     return;
   }
 
@@ -113,28 +134,20 @@ void handleClient(SSL *ssl) {
     "\r\n", strlen(fileContent));
 
   // Step 10: Send response header followed by file content
-  sendData(ssl, responseHeader);
-  sendData(ssl, fileContent);
+  if (isSSL) {
+    SSLSendData((SSL *)connection, responseHeader);
+    SSLSendData((SSL *)connection, fileContent);
+  } else {
+    rawSendData(*(int *)connection, responseHeader);
+    rawSendData(*(int *)connection, fileContent);
+  }
 
   // Step 11: Clean up allocated memory
   free(fileContent);
   return;
 }
 
-// ==== FUNCTION: main ====
-// Entry point for the Noble HTTPS server.
-int main(int argc, char **argv) {
-  printf("NOBLE HTTPS SERVER 0.1.0\n");
-
-  // Argument failure
-  if (argc < 2) {
-    fprintf(stderr, "Usage: ./%s <Port>\n", argv[0]);
-    return 1;  // Incorrect usage
-  }
-
-  // Extract port number from arguments
-  int port = atoi(argv[1]);
-
+void SSLServerLoop(int port) {
   // Initialize TLS context and load certificates
   printf("[*] Initializing SSL context\n");
   SSL_CTX *sslContext = initTLSContext();
@@ -145,7 +158,7 @@ int main(int argc, char **argv) {
   int serverSocketFD = newServerSocket(port);
   if (serverSocketFD < 0) {
     fprintf(stderr, "[!] Failed to create server socket\n");
-    return 1;
+    return;
   }
 
   // Main server loop for handling a client socket
@@ -162,13 +175,62 @@ int main(int argc, char **argv) {
     printf("[+] Client connected via TLS\n");
 
     // Handle the request and send a response
-    handleClient(ssl);
+    HandleClient(ssl, 1);  // '1' indicates SSL connection
 
     // Shutdown SSL connection
+    printf("[*] Closing client connection\n");
     SSL_shutdown(ssl);
     int clientFD = SSL_get_fd(ssl);  // Get underlying socket FD
     SSL_free(ssl);                   // Free SSL structure
     close(clientFD);                 // Close socket
+  }
+}
+
+void HTTPServerLoop(int port) {
+  // Create main server socket
+  printf("[*] Creating server socket\n");
+  int serverSocketFD = rawNewServerSocket(port);
+
+  // Main loop for accepting clients
+  while (1) {
+    printf("[*] Waiting for connection on port %d\n", port);
+
+    // Accept a new client
+    int clientSocketFD = rawAcceptClientConnection(serverSocketFD);
+    printf("[+] Client connected\n");
+
+    // Handle the client request
+    HandleClient(&clientSocketFD, 0);  // '0' indicates raw HTTP connection
+
+    // Finish
+    printf("[*] Closing client connection");
+    rawCloseSocket(clientSocketFD);
+  }
+}
+
+// ==== FUNCTION: main ====
+// Entry point for the Noble HTTP/HTTPS server.
+int main(int argc, char **argv) {
+  printf("NOBLE PORTS HTTP SERVER 0.2.0\n");
+
+  // Argument failure
+  if (argc < 3) {
+    fprintf(stderr, "Usage: ./%s <Port> <HTTPS|HTTP>\n", argv[0]);
+    return 1;  // Incorrect usage
+  }
+
+  // Extract port number from arguments
+  int port = atoi(argv[1]);
+  int SSLMode = 0;
+  // If HTTPS argument was used, use SSL HTTPS sockets
+  if (strcmp(argv[2], "HTTPS") == 0) {
+    SSLMode = 1;
+  }
+
+  if (SSLMode == 1) {
+    SSLServerLoop(port);
+  } else {
+    HTTPServerLoop(port);
   }
 
   return 0;
